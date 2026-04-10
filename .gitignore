@@ -1,0 +1,6 @@
+credentials.json
+.genlogin_session.json
+__pycache__/
+*.pyc
+*.pyo
+.env
