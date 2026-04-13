@@ -765,11 +765,11 @@ def _decode_header_value(raw: bytes) -> str:
 # REGISTER ONE LINK
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def register_one(link: str, profile: dict, context, pw, ws_endpoint, browser) -> dict:
+async def register_one(link: str, profile: dict, context, pw, ws_endpoint, browser) -> tuple[dict, object, object]:
     """
     Mo link → Turnstile → SCAN → MAP → DIEN → SUBMIT → KET QUA.
     Su dung page da co san (Genlogin browser context).
-    Tra ve dict. CDP browser co the bi reconnect neu page chet.
+    Tra ve tuple(result, context, browser). CDP browser co the bi reconnect neu page chet.
     """
     result = {
         "status":        "Failed",
@@ -793,7 +793,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
                 except Exception:
                     pass
 
-        # Su dung page dau tien con lai, hoac tao page moi
+        # Su dung page dau tien con lai, hoac tao page moi neu can
         if context.pages:
             page = context.pages[0]
         else:
@@ -804,12 +804,16 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
             except Exception:
                 pass
             new_browser = await pw.chromium.connect_over_cdp(ws_endpoint)
+            browser = new_browser
             context = new_browser.contexts[0] if new_browser.contexts else await new_browser.new_context()
             await asyncio.sleep(2)
             if context.pages:
                 page = context.pages[0]
             else:
-                page = None
+                page = await context.new_page()
+
+        if page is None:
+            raise RuntimeError("Failed to acquire a valid page after CDP reconnect")
 
         # ── Mo trang ────────────────────────────────────────────────────────
         await page.goto(link, wait_until="domcontentloaded", timeout=30000)
@@ -1517,7 +1521,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
         result["error"] = str(e)
         err(f"Loi: {e}")
 
-    return result
+    return result, context, browser
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1661,7 +1665,7 @@ async def main():
         gmail_password = profile.get("GmailPassword", "")
 
         try:
-            res = await register_one(link, profile, context, pw, ws_endpoint, browser)
+            res, context, browser = await register_one(link, profile, context, pw, ws_endpoint, browser)
         except Exception as e:
             err(f"Loi browser: {e}")
             try:
@@ -1676,7 +1680,7 @@ async def main():
                 browser = await pw.chromium.connect_over_cdp(ws_endpoint)
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()
                 page = context.pages[0] if context.pages else await context.new_page()
-                res = await register_one(link, profile, context, pw, ws_endpoint, browser)
+                res, context, browser = await register_one(link, profile, context, pw, ws_endpoint, browser)
             except Exception as e2:
                 err(f"Khoi phuc that bai: {e2}")
                 res = {
