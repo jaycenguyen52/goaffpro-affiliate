@@ -65,6 +65,8 @@ def err(msg):   _p(f"[ERROR] {msg}", C_RED, bold=True)
 # GOOGLE SHEET
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_spreadsheet_cache = None
+
 def get_client():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -75,22 +77,30 @@ def get_client():
     creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_JSON, scopes=scope)
     return gspread.authorize(creds)
 
-def read_profiles(client) -> dict:
-    ss = client.open_by_key(SPREADSHEET_ID)
+def get_spreadsheet(client):
+    global _spreadsheet_cache
+    if _spreadsheet_cache is None:
+        _spreadsheet_cache = client.open_by_key(SPREADSHEET_ID)
+    return _spreadsheet_cache
+
+def read_profiles(client, profile_index=1) -> dict:
+    ss = get_spreadsheet(client)
     sheet = ss.worksheet(PROFILES_SHEET_NAME)
     raw = sheet.get_all_values()
     data = {}
-    for row in raw:
-        if len(row) >= 2:
+    for i, row in enumerate(raw):
+        if i == 0:
+            continue
+        if len(row) > profile_index:
             key = str(row[0]).strip()
-            val = str(row[1]).strip() if row[1] else ""
+            val = str(row[profile_index]).strip() if row[profile_index] else ""
             if key:
                 data[key] = val
     return data
 
 def read_pending_links(client) -> list[tuple[int, str, str]]:
     """Doc sheet Links → tra ve cac row co Status = Pending."""
-    ss = client.open_by_key(SPREADSHEET_ID)
+    ss = get_spreadsheet(client)
     ws = ss.worksheet(LINKS_SHEET_NAME)
     raw = ws.get_all_values()
     pending = []
@@ -111,7 +121,7 @@ def update_link_status(client, row_num: int, status: str, error_msg: str = ""):
     if DRY_RUN:
         log(f"[DRY] Row {row_num} -> {status}: {error_msg}")
         return
-    ss = client.open_by_key(SPREADSHEET_ID)
+    ss = get_spreadsheet(client)
     ws = ss.worksheet(LINKS_SHEET_NAME)
     # Status=col7 ErrMsg=col11
     ws.update_cell(row_num, 7, status)
@@ -296,8 +306,14 @@ def fetch_goaffpro_emails(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--profile', type=int, default=1, help='1-based profile column index')
+    args, _ = parser.parse_known_args()
+    PROFILE_INDEX = args.profile
+
     _p("=" * 55, C_BOLD)
-    _p("  GoAffPro Email Checker v3.0", C_CYAN, bold=True)
+    _p(f"  GoAffPro Email Checker v3.0 (Profile {PROFILE_INDEX})", C_CYAN, bold=True)
     _p("=" * 55, C_BOLD)
 
     if DRY_RUN:
@@ -311,7 +327,7 @@ def main():
         err(f"Loi: {e}")
         return
 
-    profile = read_profiles(client)
+    profile = read_profiles(client, PROFILE_INDEX)
     gmail_email    = profile.get("Gmail", "")
     gmail_password = profile.get("GmailPassword", "")
 

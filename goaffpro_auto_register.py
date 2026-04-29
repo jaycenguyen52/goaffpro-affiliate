@@ -241,6 +241,8 @@ def genlogin_stop(token: str, profile_id: int):
 # GOOGLE SHEET
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_spreadsheet_cache = None
+
 def get_client():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -251,31 +253,56 @@ def get_client():
     creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_JSON, scopes=scope)
     return gspread.authorize(creds)
 
+def get_spreadsheet(client):
+    """Mo spreadsheet 1 lan, cache lai."""
+    global _spreadsheet_cache
+    if _spreadsheet_cache is None:
+        _spreadsheet_cache = client.open_by_key(SPREADSHEET_ID)
+    return _spreadsheet_cache
 
-def read_profiles(client) -> dict:
-    """Doc sheet Profiles (col A=key, col B=value) → dict."""
-    ss = client.open_by_key(SPREADSHEET_ID)
+
+def read_profiles(client, profile_index=1) -> dict:
+    """Doc sheet Profiles (col A=key, col <profile_index+1>=value) → dict."""
+    ss = get_spreadsheet(client)
     sheet = ss.worksheet(PROFILES_SHEET_NAME)
     raw = sheet.get_all_values()
     data = {}
-    for row in raw:
-        if len(row) >= 2:
+    for i, row in enumerate(raw):
+        if i == 0:
+            continue  # skip header row
+        if len(row) > profile_index:
             key = str(row[0]).strip()
-            val = str(row[1]).strip() if row[1] else ""
+            val = str(row[profile_index]).strip() if row[profile_index] else ""
             if key:
                 data[key] = val
-    log(f"Doc {len(data)} truong tu sheet Profiles")
+    log(f"Doc {len(data)} truong tu sheet Profiles (profile {profile_index})")
     return data
 
 
+def read_registered_domains(client) -> set:
+    """Doc tab Projects, tra ve set domain da dang ky."""
+    ss = get_spreadsheet(client)
+    try:
+        ws = ss.worksheet("Projects")
+    except Exception:
+        return set()
+    raw = ws.get_all_values()
+    domains = set()
+    for i, row in enumerate(raw):
+        if i == 0:
+            continue
+        domain = row[7].strip().lower() if len(row) > 7 else ""
+        if domain:
+            domains.add(domain)
+    return domains
+
+
 def read_links(client) -> list[tuple[int, str, str]]:
-    """Doc sheet Links (col A=URL, col B=Status), tra ve [(row_number, url, status), ...]."""
-    ss = client.open_by_key(SPREADSHEET_ID)
+    """Doc sheet Links, danh dau link da dang ky tu Projects, tra ve [(row_number, brand, url, status), ...]."""
+    ss = get_spreadsheet(client)
     ws = ss.worksheet(LINKS_SHEET_NAME)
     raw = ws.get_all_values()
 
-    # Tao / kiem tra header chuan 11 cot
-    # Header dung: Brand|Domain|Link Check Ads|Currency|Commission|SignUpLink|Status|Registered Email|Account Link|Registered At|Error Message
     expected_header = ["Brand", "Domain", "Link Check Ads", "Currency", "Commission",
                         "SignUpLink", "Status", "Registered Email", "Account Link",
                         "Registered At", "Error Message"]
@@ -283,23 +310,38 @@ def read_links(client) -> list[tuple[int, str, str]]:
         ws.update(values=[expected_header], range_name="A1:K1")
         raw = ws.get_all_values()
 
+    registered = read_registered_domains(client)
+    if registered:
+        log(f"Tim thay {len(registered)} domain da dang ky trong Projects")
+
+    batch_mark = []
     links = []
     for i, row in enumerate(raw):
         if i == 0:
             continue
-        # Brand=col0(A) Domain=col1(B) LinkCheckAds=col2(C) Currency=col3(D)
-        # Commission=col4(E) SignUpLink=col5(F) Status=col6(G)
         brand       = row[0].strip() if len(row) > 0 else ""
+        domain      = row[1].strip().lower() if len(row) > 1 else ""
         signup_link = row[5].strip() if len(row) > 5 else ""
         status      = row[6].strip() if len(row) > 6 else ""
+
+        if not status and domain and domain in registered:
+            batch_mark.append({'range': f'G{i+1}', 'values': [['Da dang ky']]})
+            log(f"  Skip [{brand}] {domain} — da dang ky")
+            status = "Da dang ky"
+
         if signup_link and signup_link.startswith("http"):
-            links.append((i + 1, brand, signup_link, status))   # row, brand, url, status
+            links.append((i + 1, brand, signup_link, status))
+
+    if batch_mark:
+        ws.batch_update(batch_mark)
+        ok(f"Da danh dau {len(batch_mark)} link trung voi Projects")
+
     return links
 
 
 def update_result(client, row_num: int, result: dict):
     """Ghi ket qua vao Google Sheet tai dong row_num."""
-    ss = client.open_by_key(SPREADSHEET_ID)
+    ss = get_spreadsheet(client)
     ws = ss.worksheet(LINKS_SHEET_NAME)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -475,10 +517,10 @@ async def _wait_and_check_email(
 
         if email_status in ("Approved", "Rejected"):
             # Cap nhat sheet ngay
-            ss = client.open_by_key(SPREADSHEET_ID)
+            ss = get_spreadsheet(client)
             ws = ss.worksheet(LINKS_SHEET_NAME)
-            ws.update_cell(row_num, 2, email_status)
-            ws.update_cell(row_num, 6, email_msg)
+            ws.update_cell(row_num, 7, email_status)
+            ws.update_cell(row_num, 11, email_msg)
             return email_status, email_msg
 
     # Het luot check → van Pending
@@ -783,22 +825,11 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
     try:
         step(f"Mo: {link}")
 
-        # ── Dong new-tab-page / profile-picker neu co, lay page chinh ───────
-        existing_pages = list(context.pages)
-        for pg in existing_pages:
-            url = pg.url or ""
-            if any(x in url for x in ("new-tab-page", "profile-picker", "newtab", "new_tab")):
-                try:
-                    await pg.close()
-                except Exception:
-                    pass
-
-        # Su dung page dau tien con lai, hoac tao page moi neu can
+        # ── Dung luon page co san (GenLogin CDP khong cho tao tab moi) ───────
         if context.pages:
             page = context.pages[0]
         else:
-            # Khong tao page moi vi Genlogin CDP khong ho tro
-            # Thay vao do: reconnect browser
+            # Reconnect neu khong co page nao
             try:
                 await browser.disconnect()
             except Exception:
@@ -807,10 +838,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
             browser = new_browser
             context = new_browser.contexts[0] if new_browser.contexts else await new_browser.new_context()
             await asyncio.sleep(2)
-            if context.pages:
-                page = context.pages[0]
-            else:
-                page = await context.new_page()
+            page = context.pages[0] if context.pages else None
 
         if page is None:
             raise RuntimeError("Failed to acquire a valid page after CDP reconnect")
@@ -884,7 +912,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
         if not form_found:
             result["error"] = "Form timeout"
             err("Form timeout!")
-            return result
+            return result, context, browser
 
         log("Form san sang!")
         await asyncio.sleep(random.uniform(0.5, 1.0))
@@ -993,7 +1021,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
         if not form_data:
             result["error"] = "Khong phat hien truong nao"
             err("Scan form that bai!")
-            return result
+            return result, context, browser
 
         # ═══════════════════════════════════════════════════════════════════════
         # BUOC 2 — MAP TRUONG
@@ -1104,7 +1132,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
         if not field_assignments:
             result["error"] = "Khong map duoc truong nao"
             err("Khong map duoc truong nao!")
-            return result
+            return result, context, browser
 
         # ═══════════════════════════════════════════════════════════════════════
         # BUOC 3 — DIEN TUNG TRUONG
@@ -1250,7 +1278,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
         if not filled:
             result["error"] = "Khong dien duoc truong nao"
             err("Khong dien duoc truong nao!")
-            return result
+            return result, context, browser
 
         # ═══════════════════════════════════════════════════════════════════════
         # BUOC 4 — CLOUDFLARE (sau khi dien form)
@@ -1322,7 +1350,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
                 if b['visible']:
                     log(f"  text='{b['text']}' disabled={b['disabled']} covered={b['covered']}")
             result["error"] = "Khong tim thay nut Create Account"
-            return result
+            return result, context, browser
 
         # ── CLICK BUTTON (JS click chinh, Playwright fallback) ─────────────────
 
@@ -1413,7 +1441,7 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
         if not submitted:
             result["error"] = "Click Create Account that bai (tat ca phuong phap)"
             err("Click that bai!")
-            return result
+            return result, context, browser
 
         # ═══════════════════════════════════════════════════════════════════════
         # BUOC 6 — KET QUA
@@ -1529,8 +1557,18 @@ async def register_one(link: str, profile: dict, context, pw, ws_endpoint, brows
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--profile', type=int, default=1, help='1-based profile column index')
+    parser.add_argument('--max-links', type=int, default=0, help='max links to run (0=use default)')
+    args, _ = parser.parse_known_args()
+    PROFILE_INDEX = args.profile
+    if args.max_links > 0:
+        global MAX_LINKS
+        MAX_LINKS = args.max_links
+
     _p("=" * 60, C_BOLD)
-    _p("  GoAffPro Auto-Register v4.2  (Genlogin)", C_MAGENTA, bold=True)
+    _p(f"  GoAffPro Auto-Register v4.2  (Profile {PROFILE_INDEX})", C_MAGENTA, bold=True)
     _p("=" * 60, C_BOLD)
 
     # ── Google Sheet ────────────────────────────────────────────────────────────
@@ -1545,8 +1583,8 @@ async def main():
         err(f"Loi ket noi: {e}")
         return
 
-    step("Doc sheet Profiles...")
-    profile = read_profiles(client)
+    step(f"Doc sheet Profiles (column {PROFILE_INDEX})...")
+    profile = read_profiles(client, PROFILE_INDEX)
     if not profile:
         err("Sheet Profiles trong!")
         return

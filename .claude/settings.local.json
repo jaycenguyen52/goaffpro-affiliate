@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude:*)",
+      "Bash(gh auth:*)",
+      "Read(//etc/**)",
+      "Bash(ver)",
+      "Bash(winget install:*)",
+      "Bash(export PATH=\"$PATH:/c/Program Files/GitHub CLI\")",
+      "Bash(gh --version)",
+      "Bash(git config:*)",
+      "Read(//c/Users/nguye/AppData/Local/**)",
+      "Read(//c/Users/nguye/AppData/Roaming/Microsoft/**)",
+      "Bash(cat /c/Users/nguye/.vscode/extensions/github-*)",
+      "Bash(git remote:*)",
+      "Bash(git -C \"/c/Users/nguye/.openclaw/workspace/\" remote -v)",
+      "Bash(xargs grep:*)",
+      "Bash(cmdkey /list)",
+      "Bash(python3 -c ':*)",
+      "Bash(gh repo:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git push:*)",
+      "Bash(pip show:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}
